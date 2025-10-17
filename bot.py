@@ -1,118 +1,130 @@
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.types import Message, CallbackQuery
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.default import DefaultBotProperties
-from aiogram.filters import CommandStart
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
-from datetime import datetime, timedelta
-from collections import defaultdict
+from aiogram.enums import ParseMode
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+from datetime import datetime
 
-# 🔹 ВСТАВЬ СЮДА СВОЙ ТОКЕН
 TOKEN = "8470491330:AAFKxv4plcjXZ-0JO_BLPZbYiSxZ24Vekjw"
 
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
-# Хранение данных пользователей
-user_data = defaultdict(lambda: {"business": [], "family": [], "health": []})
+# Оценочная шкала
+def get_rating_keyboard():
+    builder = InlineKeyboardBuilder()
+    for i in range(1, 11):
+        builder.button(text=str(i), callback_data=f"rate_{i}")
+    builder.adjust(5)
+    return builder.as_markup()
 
-# Клавиатура для выбора категории
-categories_kb = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="💼 Бизнес")],
-        [KeyboardButton(text="🏡 Семья")],
-        [KeyboardButton(text="💪 Здоровье")]
-    ],
-    resize_keyboard=True
-)
+# Кнопка "Начнём"
+def get_start_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Начнём 🚀", callback_data="start_rating")
+    return builder.as_markup()
 
-# Клавиатура для оценки по 10-бальной шкале
-def rating_kb(category):
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=str(i)) for i in range(1, 11)]],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-        input_field_placeholder=f"Выбери оценку для {category}"
-    )
+# Категории
+categories = [
+    ("💼🔥", "Бизнес"),
+    ("👨‍👩‍👧‍👦❤️", "Семья"),
+    ("🧘‍♂️🌿", "Здоровье"),
+    ("🧠✨", "Я")
+]
 
-# /start
-@dp.message(CommandStart())
-async def start_handler(message: Message):
-    user_name = message.from_user.first_name
+# Хранилище
+user_data = {}
+
+@dp.message(F.text)
+async def start(message: Message):
     await message.answer(
-        f"Ассаламу алейкум, {user_name}! 🌙\n"
-        f"Каждую пятницу я буду спрашивать тебя, как ты оцениваешь свои состояния по 10-бальной шкале:\n"
-        f"💼 Бизнес\n🏡 Семья\n💪 Здоровье\n\n"
-        f"Начнём прямо сейчас?",
-        reply_markup=categories_kb
+        "Ассаламу алейкум, Биржан! 🌙\n"
+        "Готов сделать небольшую самооценку по важным сферам жизни?",
+        reply_markup=get_start_keyboard()
     )
 
-# Выбор категории
-@dp.message(lambda message: message.text in ["💼 Бизнес", "🏡 Семья", "💪 Здоровье"])
-async def choose_category(message: Message):
-    category_map = {
-        "💼 Бизнес": "business",
-        "🏡 Семья": "family",
-        "💪 Здоровье": "health"
-    }
-    category = category_map[message.text]
-    await message.answer(f"Оцени {message.text} по 10-бальной шкале 👇", reply_markup=rating_kb(message.text))
-    dp["category"] = category
+@dp.callback_query(F.data == "start_rating")
+async def start_rating(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_data[user_id] = {"step": 0, "answers": {}, "month": datetime.now().month}
+    icon, name = categories[0]
+    await callback.message.edit_text(
+        f"Оцени свой {icon} <b>{name}</b> от 1 до 10 👇",
+        reply_markup=get_rating_keyboard()
+    )
 
-# Оценка по шкале
-@dp.message(lambda message: message.text.isdigit() and 1 <= int(message.text) <= 10)
-async def rating_handler(message: Message):
-    user_id = message.from_user.id
-    category = dp.get("category", None)
+@dp.callback_query(F.data.startswith("rate_"))
+async def handle_rating(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    if user_id not in user_data:
+        return await callback.answer("Начни заново 🙏", show_alert=True)
 
-    if not category:
-        await message.answer("Сначала выбери категорию 💼/🏡/💪", reply_markup=categories_kb)
-        return
+    step = user_data[user_id]["step"]
+    rating = int(callback.data.split("_")[1])
+    icon, category = categories[step]
+    user_data[user_id]["answers"][category] = rating
+    user_data[user_id]["step"] += 1
 
-    rating = int(message.text)
-    user_data[user_id][category].append(rating)
+    if user_data[user_id]["step"] < len(categories):
+        icon, next_category = categories[user_data[user_id]["step"]]
+        await callback.message.edit_text(
+            f"Теперь оцени свой {icon} <b>{next_category}</b> от 1 до 10 👇",
+            reply_markup=get_rating_keyboard()
+        )
+    else:
+        await callback.message.edit_text(
+            "Отлично, Биржан 🙌\n"
+            "Твои оценки сохранены. В конце месяца я покажу тебе общий итог 📊"
+        )
 
-    await message.answer(f"✅ Записано! Твоя оценка: {rating} за {category}.", reply_markup=categories_kb)
+# 📅 Напоминание каждую пятницу
+async def send_weekly_reminder():
+    user_id = list(user_data.keys())[0] if user_data else None
+    if user_id:
+        await bot.send_message(
+            user_id,
+            "Пятница 🌙 Время подвести итоги недели!\n\n"
+            "Готов пройти самооценку? ✨",
+            reply_markup=get_start_keyboard()
+        )
 
-# Автоматическое сообщение каждую пятницу
-async def weekly_check():
-    while True:
-        now = datetime.now()
-        if now.weekday() == 4 and now.hour == 10:  # Пятница 10:00
-            for user_id in user_data.keys():
-                await bot.send_message(
-                    user_id,
-                    "Пятница! Время оценить свою неделю 🌞\nВыбери категорию:",
-                    reply_markup=categories_kb
-                )
-            await asyncio.sleep(86400)  # ждать сутки
-        await asyncio.sleep(3600)  # проверять раз в час
+# 🗓️ Отчёт 1 числа месяца
+async def send_monthly_report():
+    for user_id, data in user_data.items():
+        answers = data.get("answers", {})
+        if not answers:
+            continue
 
-# Отчёт 1 числа месяца
-async def monthly_report():
-    while True:
-        now = datetime.now()
-        if now.day == 1 and now.hour == 9:
-            for user_id, data in user_data.items():
-                report = []
-                for k, v in data.items():
-                    if v:
-                        avg = sum(v) / len(v)
-                        name = "Бизнес" if k == "business" else "Семья" if k == "family" else "Здоровье"
-                        report.append(f"{name}: {avg:.1f} баллов")
-                        user_data[user_id][k] = []  # очищаем оценки
-                if report:
-                    text = "📊 <b>Отчёт за месяц:</b>\n" + "\n".join(report)
-                    await bot.send_message(user_id, text)
-            await asyncio.sleep(86400)
-        await asyncio.sleep(3600)
+        report = "📊 <b>Твой отчёт за месяц:</b>\n\n"
+        for cat, score in answers.items():
+            report += f"{cat}: {score}/10\n"
 
-# Основная функция
+        avg = sum(answers.values()) / len(answers)
+        report += f"\nСредняя оценка месяца: <b>{avg:.1f}/10</b>\n\n"
+        report += "💡 Продолжай осознанно расти, Биржан!"
+
+        await bot.send_message(user_id, report)
+
+# 🔁 Запуск планировщика
+def setup_scheduler():
+    # каждую пятницу в 19:00
+    scheduler.add_job(send_weekly_reminder, CronTrigger(day_of_week="fri", hour=19, minute=0))
+    # 1 числа каждого месяца в 10:00
+    scheduler.add_job(send_monthly_report, CronTrigger(day=1, hour=10, minute=0))
+    scheduler.start()
+
 async def main():
-    print("✅ Бот запущен и работает...")
-    asyncio.create_task(weekly_check())
-    asyncio.create_task(monthly_report())
+    print("🚀 Бот запущен и планировщик работает!")
+    setup_scheduler()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+if __name__ == "__main__":
+    import os
+    PORT = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=PORT)
